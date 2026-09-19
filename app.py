@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import tempfile
 import subprocess
+import re
 from groq import Groq
 import srt
 from datetime import timedelta
@@ -9,7 +10,7 @@ from datetime import timedelta
 st.set_page_config(page_title="Video Subtitle Generator AI", layout="wide", page_icon="🎬")
 
 st.title("🎬 Video Subtitle Generator App")
-st.caption("Unggah video dan dapatkan file subtitle (.srt) transkrip percakapan secara otomatis!")
+st.caption("Unggah video/audio dan dapatkan file subtitle (.srt) transkrip akurat tanpa teks berulang!")
 
 # Sidebar Config
 st.sidebar.header("🔑 API Configurations")
@@ -17,10 +18,21 @@ st.sidebar.header("🔑 API Configurations")
 default_groq = st.secrets.get("GROQ_API_KEY", "")
 groq_api_key = st.sidebar.text_input("Groq API Key", value=default_groq, type="password", help="Dapatkan gratis di console.groq.com")
 
-uploaded_file = st.file_uploader("Pilih file video (.mp4, .mov, .avi, .mkv)", type=["mp4", "mov", "avi", "mkv"])
+uploaded_file = st.file_uploader(
+    "Pilih file video atau audio (.mp4, .mov, .avi, .mkv, .mp3, .m4a, .wav)", 
+    type=["mp4", "mov", "avi", "mkv", "mp3", "m4a", "wav"]
+)
+
+def remove_repetitions(text):
+    """Membagikan & membersihkan kata/frasa berulang dalam satu segmen"""
+    if not text:
+        return ""
+    # Hapus pengulangan kata beruntun (misal: "terima kasih terima kasih terima kasih")
+    cleaned_text = re.sub(r'(\b.+\b)( \1)+', r'\1', text, flags=re.IGNORECASE)
+    return cleaned_text.strip()
 
 def get_video_duration(video_path):
-    """Mendapatkan durasi video (dalam detik) menggunakan ffprobe"""
+    """Mendapatkan durasi media (dalam detik) menggunakan ffprobe"""
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration",
@@ -50,12 +62,14 @@ def extract_audio_chunk(video_path, output_audio_path, start_sec, duration_sec):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 def transcribe_audio_file(client_groq, audio_file_path):
-    """Mentranskripsi file audio via Groq Whisper API"""
+    """Mentranskripsi file audio via Groq Whisper API dengan penanganan anti-repetisi"""
     with open(audio_file_path, "rb") as audio_file:
         transcription = client_groq.audio.transcriptions.create(
             file=(audio_file_path, audio_file.read()),
             model="whisper-large-v3",
-            response_format="verbose_json"
+            response_format="verbose_json",
+            temperature=0.0,  # Mengurangi halusinasi & perulangan acak
+            prompt="Transkrip percakapan berikut secara rinci, akurat, dan abaikan keheningan atau musik latar."
         )
     
     if hasattr(transcription, "segments"):
@@ -66,22 +80,31 @@ def transcribe_audio_file(client_groq, audio_file_path):
         raw_segments = getattr(transcription, "segments", [])
 
     segments_dict_list = []
+    last_text = ""
+
     for s in raw_segments:
-        if isinstance(s, dict):
-            segments_dict_list.append(s)
-        else:
+        start = getattr(s, "start", s.get("start", 0.0) if isinstance(s, dict) else 0.0)
+        end = getattr(s, "end", s.get("end", 0.0) if isinstance(s, dict) else 0.0)
+        text = getattr(s, "text", s.get("text", "") if isinstance(s, dict) else "")
+
+        # Pembersihan pengulangan kata beruntun
+        clean_text = remove_repetitions(text)
+
+        # Lewati jika segmen ini 100% sama dengan segmen sebelumnya (mencegah loop antar-segmen)
+        if clean_text and clean_text.lower() != last_text.lower():
             segments_dict_list.append({
-                "start": getattr(s, "start", 0.0),
-                "end": getattr(s, "end", 0.0),
-                "text": getattr(s, "text", "")
+                "start": start,
+                "end": end,
+                "text": clean_text
             })
+            last_text = clean_text
             
     return segments_dict_list
 
 def process_video_transcription(video_path):
     client_groq = Groq(api_key=groq_api_key)
 
-    st.info("🎵 1/2: Memisahkan & memeriksa durasi video...")
+    st.info("🎵 1/2: Memisahkan & memeriksa durasi audio/video...")
     
     duration_seconds = get_video_duration(video_path)
     chunk_duration = 600  # 10 menit per bagian
@@ -90,7 +113,7 @@ def process_video_transcription(video_path):
     st.info("🎙️ 2/2: Mentranskripsi suara ke teks (Speech-to-Text)...")
 
     if duration_seconds > chunk_duration:
-        st.warning(f"Video berdurasi panjang ({duration_seconds/60:.1f} menit). Memproses audio dalam beberapa bagian...")
+        st.warning(f"Media berdurasi panjang ({duration_seconds/60:.1f} menit). Memproses dalam beberapa bagian...")
         
         start_time = 0.0
         chunk_idx = 1
