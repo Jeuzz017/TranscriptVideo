@@ -170,11 +170,13 @@ if uploaded_file is not None:
     original_filename = os.path.splitext(uploaded_file.name)[0]
     srt_filename = f"{original_filename}.srt"
 
+    # Menampilkan notifikasi berhasil unggah sebagai pengganti video player
+    file_size_mb = uploaded_file.size / (1024 * 1024)
+    st.success(f"📁 File **{uploaded_file.name}** ({file_size_mb:.1f} MB) berhasil diunggah!")
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
         tmp_file.write(uploaded_file.read())
         temp_video_path = tmp_file.name
-
-    st.video(uploaded_file)
 
     if st.button("🚀 Buat Subtitle Video", type="primary"):
         if not groq_api_key:
