@@ -27,8 +27,10 @@ def remove_repetitions(text):
     """Membagikan & membersihkan kata/frasa berulang dalam satu segmen"""
     if not text:
         return ""
-    # Hapus pengulangan kata beruntun (misal: "terima kasih terima kasih terima kasih")
+    # Hapus pengulangan kata beruntun (misal: "terima kasih terima kasih")
     cleaned_text = re.sub(r'(\b.+\b)( \1)+', r'\1', text, flags=re.IGNORECASE)
+    # Hapus spasi ganda atau berlebih
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
     return cleaned_text.strip()
 
 def get_video_duration(video_path):
@@ -46,7 +48,7 @@ def get_video_duration(video_path):
         return 0.0
 
 def extract_audio_chunk(video_path, output_audio_path, start_sec, duration_sec):
-    """Memotong & mengekstrak audio langsung dengan FFmpeg CLI"""
+    """Memotong & mengekstrak audio langsung dengan FFmpeg CLI (Stereo to Mono, 16kHz)"""
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start_sec),
@@ -62,14 +64,14 @@ def extract_audio_chunk(video_path, output_audio_path, start_sec, duration_sec):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 def transcribe_audio_file(client_groq, audio_file_path):
-    """Mentranskripsi file audio via Groq Whisper API dengan penanganan anti-repetisi"""
+    """Mentranskripsi file audio via Groq Whisper API dengan peningkatan presisi"""
     with open(audio_file_path, "rb") as audio_file:
         transcription = client_groq.audio.transcriptions.create(
             file=(audio_file_path, audio_file.read()),
             model="whisper-large-v3",
             response_format="verbose_json",
-            temperature=0.0,  # Mengurangi halusinasi & perulangan acak
-            prompt="Transkrip percakapan berikut secara rinci, akurat, dan abaikan keheningan atau musik latar."
+            temperature=0.0,  # Menghilangkan determinisme acak/halusinasi
+            prompt="Transkripsi percakapan berikut dengan tepat, konsisten, akurat, dan abaikan musik latar atau suara hening."
         )
     
     if hasattr(transcription, "segments"):
@@ -90,8 +92,8 @@ def transcribe_audio_file(client_groq, audio_file_path):
         # Pembersihan pengulangan kata beruntun
         clean_text = remove_repetitions(text)
 
-        # Lewati jika segmen ini 100% sama dengan segmen sebelumnya (mencegah loop antar-segmen)
-        if clean_text and clean_text.lower() != last_text.lower():
+        # Filter suara hening / segmen tanpa makna (< 2 karakter) & pencegahan duplikasi beruntun
+        if len(clean_text) >= 2 and clean_text.lower() != last_text.lower():
             segments_dict_list.append({
                 "start": start,
                 "end": end,
@@ -164,6 +166,10 @@ def process_video_transcription(video_path):
     return srt_output, all_segments
 
 if uploaded_file is not None:
+    # Mendapatkan nama file asli tanpa ekstensi untuk nama file .srt
+    original_filename = os.path.splitext(uploaded_file.name)[0]
+    srt_filename = f"{original_filename}.srt"
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
         tmp_file.write(uploaded_file.read())
         temp_video_path = tmp_file.name
@@ -184,9 +190,9 @@ if uploaded_file is not None:
                     with col1:
                         st.subheader("📥 Download Subtitle (.srt)")
                         st.download_button(
-                            label="Download File .SRT",
+                            label=f"Download {srt_filename}",
                             data=srt_content,
-                            file_name="transcript_subtitle.srt",
+                            file_name=srt_filename,
                             mime="text/plain"
                         )
                     
