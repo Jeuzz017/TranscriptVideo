@@ -2,15 +2,13 @@ import streamlit as st
 import os
 import tempfile
 import subprocess
-import re
-from groq import Groq
 import srt
 from datetime import timedelta
 
 st.set_page_config(page_title="Video Subtitle Generator AI", layout="wide", page_icon="🎬")
 
 st.title("🎬 Video Subtitle Generator App")
-st.caption("Unggah video/audio dan dapatkan file subtitle (.srt) transkrip akurat tanpa teks berulang!")
+st.caption("Unggah video/audio dan dapatkan file subtitle (.srt) dengan timestamp presisi & transkrip akurat!")
 
 # Sidebar Config
 st.sidebar.header("🔑 API Configurations")
@@ -22,16 +20,6 @@ uploaded_file = st.file_uploader(
     "Pilih file video atau audio (.mp4, .mov, .avi, .mkv, .mp3, .m4a, .wav)", 
     type=["mp4", "mov", "avi", "mkv", "mp3", "m4a", "wav"]
 )
-
-def remove_repetitions(text):
-    """Membagikan & membersihkan kata/frasa berulang dalam satu segmen"""
-    if not text:
-        return ""
-    # Hapus pengulangan kata beruntun (misal: "terima kasih terima kasih")
-    cleaned_text = re.sub(r'(\b.+\b)( \1)+', r'\1', text, flags=re.IGNORECASE)
-    # Hapus spasi ganda atau berlebih
-    cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
-    return cleaned_text.strip()
 
 def get_video_duration(video_path):
     """Mendapatkan durasi media (dalam detik) menggunakan ffprobe"""
@@ -47,8 +35,22 @@ def get_video_duration(video_path):
     except Exception:
         return 0.0
 
+def extract_full_audio(video_path, output_audio_path):
+    """Ekstraksi seluruh audio ke MP3 Mono 96k (Kualitas Vokal Optimal & Ukuran Efisien)"""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-vn",
+        "-acodec", "libmp3lame",
+        "-ab", "96k",
+        "-ac", "1",
+        "-ar", "16000",
+        output_audio_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
 def extract_audio_chunk(video_path, output_audio_path, start_sec, duration_sec):
-    """Memotong & mengekstrak audio langsung dengan FFmpeg CLI (Stereo to Mono, 16kHz)"""
+    """Memotong audio untuk file sangat besar dengan FFmpeg CLI"""
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start_sec),
@@ -56,7 +58,7 @@ def extract_audio_chunk(video_path, output_audio_path, start_sec, duration_sec):
         "-t", str(duration_sec),
         "-vn",
         "-acodec", "libmp3lame",
-        "-ab", "64k",
+        "-ab", "96k",
         "-ac", "1",
         "-ar", "16000",
         output_audio_path
@@ -64,14 +66,14 @@ def extract_audio_chunk(video_path, output_audio_path, start_sec, duration_sec):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 def transcribe_audio_file(client_groq, audio_file_path):
-    """Mentranskripsi file audio via Groq Whisper API dengan peningkatan presisi"""
+    """Mentranskripsi file audio via Groq Whisper API dengan penanganan akurasi penuh"""
     with open(audio_file_path, "rb") as audio_file:
         transcription = client_groq.audio.transcriptions.create(
             file=(audio_file_path, audio_file.read()),
             model="whisper-large-v3",
             response_format="verbose_json",
-            temperature=0.0,  # Menghilangkan determinisme acak/halusinasi
-            prompt="Transkripsi percakapan berikut dengan tepat, konsisten, akurat, dan abaikan musik latar atau suara hening."
+            temperature=0.0,
+            prompt="Transkripsikan seluruh percakapan ucapan manusia ini secara lengkap, kata demi kata, akurat, dan sesuai dengan bahasa aslinya tanpa melewatkan kalimat apa pun."
         )
     
     if hasattr(transcription, "segments"):
@@ -82,40 +84,45 @@ def transcribe_audio_file(client_groq, audio_file_path):
         raw_segments = getattr(transcription, "segments", [])
 
     segments_dict_list = []
-    last_text = ""
-
     for s in raw_segments:
         start = getattr(s, "start", s.get("start", 0.0) if isinstance(s, dict) else 0.0)
         end = getattr(s, "end", s.get("end", 0.0) if isinstance(s, dict) else 0.0)
-        text = getattr(s, "text", s.get("text", "") if isinstance(s, dict) else "")
+        text = getattr(s, "text", s.get("text", "") if isinstance(s, dict) else "").strip()
 
-        # Pembersihan pengulangan kata beruntun
-        clean_text = remove_repetitions(text)
-
-        # Filter suara hening / segmen tanpa makna (< 2 karakter) & pencegahan duplikasi beruntun
-        if len(clean_text) >= 2 and clean_text.lower() != last_text.lower():
+        # Ambil semua segmen yang memiliki teks asli tanpa potongan berlebih
+        if text:
             segments_dict_list.append({
                 "start": start,
                 "end": end,
-                "text": clean_text
+                "text": text
             })
-            last_text = clean_text
             
     return segments_dict_list
 
 def process_video_transcription(video_path):
+    from groq import Groq
     client_groq = Groq(api_key=groq_api_key)
 
-    st.info("🎵 1/2: Memisahkan & memeriksa durasi audio/video...")
+    st.info("🎵 1/2: Mengekstrak trek audio dari media...")
     
-    duration_seconds = get_video_duration(video_path)
-    chunk_duration = 600  # 10 menit per bagian
+    # Simpan audio hasil konversi
+    full_audio_path = video_path + "_extracted.mp3"
+    extract_full_audio(video_path, full_audio_path)
+    
+    audio_size_mb = os.path.getsize(full_audio_path) / (1024 * 1024)
     all_segments = []
 
     st.info("🎙️ 2/2: Mentranskripsi suara ke teks (Speech-to-Text)...")
 
-    if duration_seconds > chunk_duration:
-        st.warning(f"Media berdurasi panjang ({duration_seconds/60:.1f} menit). Memproses dalam beberapa bagian...")
+    # Jika ukuran file audio < 24 MB (Limit Groq 25 MB), proses langsung seluruhnya tanpa dipotong!
+    if audio_size_mb < 24.0:
+        st.text("Memproses audio utuh sekaligus untuk menjaga akurasi & presisi timestamp...")
+        all_segments = transcribe_audio_file(client_groq, full_audio_path)
+    else:
+        # Jika > 24 MB, lakukan chunking per 15 menit
+        duration_seconds = get_video_duration(video_path)
+        chunk_duration = 900  # 15 menit
+        st.warning(f"File audio besar ({audio_size_mb:.1f} MB). Memproses dalam beberapa bagian...")
         
         start_time = 0.0
         chunk_idx = 1
@@ -124,8 +131,7 @@ def process_video_transcription(video_path):
             current_duration = min(chunk_duration, duration_seconds - start_time)
             st.text(f"--- Memproses bagian {chunk_idx} ({start_time/60:.1f} m - {(start_time+current_duration)/60:.1f} m) ---")
             
-            chunk_audio_path = video_path.replace(os.path.splitext(video_path)[1], f"_chunk_{chunk_idx}.mp3")
-            
+            chunk_audio_path = f"{video_path}_chunk_{chunk_idx}.mp3"
             extract_audio_chunk(video_path, chunk_audio_path, start_time, current_duration)
             
             segments = transcribe_audio_file(client_groq, chunk_audio_path)
@@ -142,13 +148,9 @@ def process_video_transcription(video_path):
                 
             start_time += chunk_duration
             chunk_idx += 1
-    else:
-        audio_path = video_path.replace(os.path.splitext(video_path)[1], ".mp3")
-        extract_audio_chunk(video_path, audio_path, 0, duration_seconds)
-        all_segments = transcribe_audio_file(client_groq, audio_path)
-        
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
+
+    if os.path.exists(full_audio_path):
+        os.remove(full_audio_path)
 
     # Buat File SRT Subtitle
     srt_subtitles = []
@@ -166,11 +168,9 @@ def process_video_transcription(video_path):
     return srt_output, all_segments
 
 if uploaded_file is not None:
-    # Mendapatkan nama file asli tanpa ekstensi untuk nama file .srt
     original_filename = os.path.splitext(uploaded_file.name)[0]
     srt_filename = f"{original_filename}.srt"
 
-    # Menampilkan notifikasi berhasil unggah sebagai pengganti video player
     file_size_mb = uploaded_file.size / (1024 * 1024)
     st.success(f"📁 File **{uploaded_file.name}** ({file_size_mb:.1f} MB) berhasil diunggah!")
 
